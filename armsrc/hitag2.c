@@ -1343,8 +1343,13 @@ void SniffHitag2(bool ledcontrol) {
 // Hitag 2 simulation
 void SimulateHitag2(bool ledcontrol) {
 
-    BigBuf_free();
-    BigBuf_Clear_ext(false);
+    // Keep the dump uploaded by `lf hitag eload` and use it as the simulated
+    // transponder memory.  BigBuf_free()/BigBuf_Clear_ext() would discard the
+    // emulator allocation and erase its contents before simulation starts.
+    uint8_t *emulator = BigBuf_get_EM_addr();
+    memcpy(tag.sectors, emulator, HITAG2_MAX_BYTE_SIZE);
+    BigBuf_free_keep_EM();
+    BigBuf_Clear_keep_EM();
     set_tracing(true);
 
     // empties bigbuff etc
@@ -1384,6 +1389,8 @@ void SimulateHitag2(bool ledcontrol) {
 // SIMULATE
     uint32_t signal_size = 10000;
     while (BUTTON_PRESS() == false) {
+
+        memset(rx, 0x00, sizeof(rx));
 
         // use malloc
         initSampleBufferEx(&signal_size, true);
@@ -1504,16 +1511,22 @@ void SimulateHitag2(bool ledcontrol) {
         if (nrzs < 5) {
             Dbprintf("Detected unexpected number of manchester decoded samples [%d]", nrzs);
             continue;
-        } else {
-            for (size_t i = 0; i < 5; i++) {
-                if (nrz_samples[i] != 1) {
-                    Dbprintf("Detected incorrect header, the bit [%d] is zero instead of one", i);
-                }
-            }
         }
 
-        // Pack the response into a byte array
-        for (size_t i = 5; i < 37; i++) {
+        bool valid_header = true;
+        for (size_t i = 0; i < 5; i++) {
+            if (nrz_samples[i] != 1) {
+                Dbprintf("Detected incorrect header, the bit [%d] is zero instead of one", i);
+                valid_header = false;
+            }
+        }
+        if (valid_header == false) continue;
+
+        // Strip the five-bit Manchester decoder header and pack the complete
+        // reader command.  In particular, START_AUTH is only five bits long;
+        // forcing every frame to 32 bits prevents the command handler from
+        // recognizing it and therefore suppresses the UID response.
+        for (size_t i = 5; i < nrzs; i++) {
             uint8_t bit = nrz_samples[i];
             rx[rxlen / 8] |= bit << (7 - (rxlen % 8));
             rxlen++;
@@ -1543,8 +1556,7 @@ void SimulateHitag2(bool ledcontrol) {
                 LogTraceBits(tx, txlen, 0, 0, false);
             }
 
-            // Reset the received frame and response timing info
-            memset(rx, 0x00, sizeof(rx));
+            // Reset response timing info
             response = 0;
 
             if (ledcontrol) LED_B_OFF();
@@ -1553,8 +1565,9 @@ void SimulateHitag2(bool ledcontrol) {
 
     lf_finalize(ledcontrol);
 
-    // release allocated memory from BigBuff.
-    BigBuf_free();
+    // Preserve writes made while simulating for `lf hitag eview`.
+    memcpy(emulator, tag.sectors, HITAG2_MAX_BYTE_SIZE);
+    BigBuf_free_keep_EM();
 
     DbpString("Sim stopped");
 
