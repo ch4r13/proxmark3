@@ -39,6 +39,7 @@
 #include "iso15693.h"
 #include "iclass_cmd.h"              // iclass_card_select_t struct
 #include "i2c.h"                     // i2c defines (SIM module access)
+#include "sam_common.h"              
 #include "printf.h"
 
 uint8_t get_pagemap(const picopass_hdr_t *hdr) {
@@ -1599,6 +1600,62 @@ void ReaderIClass(uint8_t *msg) {
 
 out:
     switch_off();
+}
+
+// Raw iCLASS reader exchange that leaves the field ON
+// The field is only dropped by CMD_HF_DROPFIELD (or a failed select).
+void iClass_Raw(uint8_t *msg) {
+    uint8_t flags = msg[0];
+    uint16_t rawlen = (uint16_t)msg[1] | ((uint16_t)msg[2] << 8);
+    uint8_t *raw = msg + 3;
+
+    uint32_t start_time = 0, eof_time = 0;
+
+    if (flags & 0x01) {                         // INIT: energize + select
+        Iso15693InitReader();
+        picopass_hdr_t hdr = {0};
+        if (select_iclass_tag(&hdr, false, &eof_time, false) == false) {
+            switch_off();
+            reply_ng(CMD_HF_ICLASS_RAW, PM3_ERFTRANS, NULL, 0);
+            return;
+        }
+        if (rawlen == 0) {                      // scan: return the header, keep field ON
+            switch_clock_to_ticks();
+            reply_ng(CMD_HF_ICLASS_RAW, PM3_SUCCESS, (uint8_t *)&hdr, sizeof(picopass_hdr_t));
+            return;
+        }
+        start_time = eof_time + DELAY_ICLASS_VICC_TO_VCD_READER;
+    } else {
+        switch_clock_to_countsspclk();
+    }
+
+    uint8_t resp[ICLASS_BUFFER_SIZE] = {0};
+    uint16_t resp_len = 0;
+
+    start_time = GetCountSspClk();
+    bool is_update = rawlen > 0 && ((raw[0] & 0x0F) == ICLASS_CMD_UPDATE);
+    uint8_t tries = is_update ? 1 : 3;
+    uint16_t timeout = is_update ? ICLASS_READER_TIMEOUT_UPDATE : ICLASS_READER_TIMEOUT_ACTALL;
+    int res = PM3_ECARDEXCHANGE;
+    while (tries-- > 0) {
+        iclass_send_as_reader(raw, rawlen, &start_time, &eof_time, false);
+        resp_len = 0;
+        res = GetIso15693AnswerFromTag(resp, sizeof(resp), timeout, &eof_time,
+                                       false, true, &resp_len);
+        if (res == PM3_SUCCESS && resp_len > 0) {
+            break;
+        }
+        start_time = eof_time + ((DELAY_ICLASS_VICC_TO_VCD_READER +
+                                  DELAY_ISO15693_VCD_TO_VICC_READER +
+                                  (8 * 8 * 8 * 16)) * 2);
+    }
+    switch_clock_to_ticks();
+    if (res == PM3_SUCCESS && resp_len > 0) {
+        reply_ng(CMD_HF_ICLASS_RAW, PM3_SUCCESS, resp, resp_len);
+    } else {
+        reply_ng(CMD_HF_ICLASS_RAW, PM3_ECARDEXCHANGE, NULL, 0);
+    }
+    // field left ON; the host drops it via CMD_HF_DROPFIELD
 }
 
 bool authenticate_iclass_tag(iclass_auth_req_t *payload, picopass_hdr_t *hdr, uint32_t *start_time, uint32_t *eof_time, uint8_t *mac_out) {
