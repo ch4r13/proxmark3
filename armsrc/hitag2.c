@@ -1325,6 +1325,12 @@ void SimulateHitag2(bool ledcontrol) {
     memcpy(tag.sectors, emulator, HITAG2_MAX_BYTE_SIZE);
     BigBuf_free_keep_EM();
     BigBuf_Clear_keep_EM();
+    set_tracing(true);
+
+    // empties bigbuff etc
+    lf_init(LF_ADC_TAG_SIM, LF_ADC_WAV_REVERSED, ledcontrol);
+
+    int response = 0;
     uint8_t rx[HITAG_FRAME_LEN] = {0};
     uint8_t tx[HITAG_FRAME_LEN] = {0};
     size_t rxlen = 0;
@@ -1354,8 +1360,17 @@ void SimulateHitag2(bool ledcontrol) {
 
     hitag_setup_fpga(0, 127, ledcontrol);
 
-    while ((BUTTON_PRESS() == false) && (data_available() == false)) {
-        uint32_t start_time = 0;
+        memset(rx, 0x00, sizeof(rx));
+
+        // use malloc
+        initSampleBufferEx(&signal_size, true);
+
+        if (ledcontrol) {
+            LED_D_ON();
+            LED_A_OFF();
+        }
+
+//        lf_reset_counter();
         WDT_HIT();
 
         // Reader-to-tag traffic uses binary pulse length modulation.  The old
@@ -1367,6 +1382,59 @@ void SimulateHitag2(bool ledcontrol) {
             LogTraceBits(rx, rxlen, start_time, TIMESTAMP, true);
             StopLoEdgeCapture();
 
+        if (ledcontrol) LED_A_OFF();
+
+        // Make sure we always have an even number of samples. This fixes the problem
+        // of ending the manchester decoding with a zero. See the example below where
+        // the '|' character is end of modulation
+        //  One at the end: ..._-|_____...
+        // Zero at the end: ...-_|_____...
+        // The last modulation change of a zero is not detected, but we should take
+        // the half period in account, otherwise the demodulator will fail.
+        if ((nrzs % 2) != 0) {
+            if (nrzs >= max_nrzs) {
+                Dbprintf("max_nrzs (%d) is odd?  Must be even!", max_nrzs); // should be a static assert above
+                continue;
+            }
+            nrz_samples[nrzs++] = reader_modulation;
+        }
+
+        if (ledcontrol) LED_B_ON();
+
+        // decode bitstream
+        manrawdecode((uint8_t *)nrz_samples, &nrzs, true, 0);
+
+        // Verify if the header consists of five consecutive ones
+        if (nrzs < 5) {
+            Dbprintf("Detected unexpected number of manchester decoded samples [%d]", nrzs);
+            continue;
+        }
+
+        bool valid_header = true;
+        for (size_t i = 0; i < 5; i++) {
+            if (nrz_samples[i] != 1) {
+                Dbprintf("Detected incorrect header, the bit [%d] is zero instead of one", i);
+                valid_header = false;
+            }
+        }
+        if (valid_header == false) continue;
+
+        // Strip the five-bit Manchester decoder header and pack the complete
+        // reader command.  In particular, START_AUTH is only five bits long;
+        // forcing every frame to 32 bits prevents the command handler from
+        // recognizing it and therefore suppresses the UID response.
+        for (size_t i = 5; i < nrzs; i++) {
+            uint8_t bit = nrz_samples[i];
+            rx[rxlen / 8] |= bit << (7 - (rxlen % 8));
+            rxlen++;
+        }
+
+        // Check if frame was captured
+        if (rxlen > 4) {
+
+            LogTraceBits(rx, rxlen, response, response, true);
+
+            // Process the incoming frame (rx) and prepare the outgoing frame (tx)
             hitag2_handle_reader_command(rx, rxlen, tx, &txlen);
 
             while (GetPrecisionCounter() < T0 * (HITAG_T_WAIT_RESP - HITAG_T_LOW)) {};
@@ -1377,8 +1445,10 @@ void SimulateHitag2(bool ledcontrol) {
                 LogTraceBits(tx, txlen, start_time, TIMESTAMP, false);
             }
 
-            EnableLoEdgeCapture();
-            memset(rx, 0x00, sizeof(rx));
+            // Reset response timing info
+            response = 0;
+
+            if (ledcontrol) LED_B_OFF();
         }
 
         rxlen = 0;
