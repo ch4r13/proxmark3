@@ -15,6 +15,7 @@
 //-----------------------------------------------------------------------------
 
 #include "hitag2.h"
+#include "hitag_common.h"
 #include "hitag2/hitag2_crypto.h"
 #include "string.h"
 #include "proxmark3_arm.h"
@@ -108,41 +109,15 @@ static void hitag2_init(void) {
     hitag2_reset();
 }
 
-// The input-capture timer (StartInputCapture, see common_arm/ticks) runs at
-// TIMER_CLOCK3 = MCK/32 = 1.5 MHz. Hitag units (T0) have a duration of 8 us
-// (1/125000 s, the carrier period), so T0 = 1.5 MHz / 125 kHz = 12 counter ticks.
-#ifndef HITAG_T0
-#define HITAG_T0               12
-#endif
-
-#define HITAG_FRAME_LEN  20
 #define HITAG_FRAME_BIT_COUNT   (8 * HITAG_FRAME_LEN)
-#define HITAG_T_STOP     36 /* T_EOF should be > 36 */
-#define HITAG_T_LOW      6  /* T_LOW should be 4..10 */
-#define HITAG_T_0_MIN    15 /* T[0] should be 18..22 */
-#define HITAG_T_0        20 /* T[0] should be 18..22 */
-#define HITAG_T_1_MIN    25 /* T[1] should be 26..30 */
-#define HITAG_T_1        30 /* T[1] should be 26..30 */
-#define HITAG_T_EOF      80 /* T_EOF should be > 36    and must be larger than HITAG_T_TAG_CAPTURE_FOUR_HALF */
+#define HT2_T_LOW      6  /* T_LOW should be 4..10 */
+#define HT2_T_1        30 /* T[1] should be 26..30 */
 #define HITAG_T_WAIT_1_MIN   199 /* T_wresp should be 199..206 */
 #define HITAG_T_WAIT_2_MIN   90 /* T_wait2 should be at least 90 */
 #define HITAG_T_WAIT_MAX 300 /* bit more than HITAG_T_WAIT_1 + HITAG_T_WAIT_2 */
 #define HITAG_T_PROG     614
 #define HITAG_T_WAIT_POWERUP   313 /* transponder internal powerup time is 312.5 */
 #define HITAG_T_WAIT_START_AUTH_MAX   232 /* transponder waiting time to receive the START_AUTH command is 232.5, then it enters public mode */
-
-#define HITAG_T_TAG_ONE_HALF_PERIOD     10
-#define HITAG_T_TAG_TWO_HALF_PERIOD     25
-#define HITAG_T_TAG_THREE_HALF_PERIOD   41
-#define HITAG_T_TAG_FOUR_HALF_PERIOD    57
-
-#define HITAG_T_TAG_HALF_PERIOD         16
-#define HITAG_T_TAG_FULL_PERIOD         32
-
-#define HITAG_T_TAG_CAPTURE_ONE_HALF    13
-#define HITAG_T_TAG_CAPTURE_TWO_HALF    25
-#define HITAG_T_TAG_CAPTURE_THREE_HALF  41
-#define HITAG_T_TAG_CAPTURE_FOUR_HALF   57
 
 #define HT2_MAX_NRSZ  ((8 * HITAG_FRAME_LEN + 5) * 2)
 
@@ -241,7 +216,7 @@ static void hitag2_handle_reader_command(uint8_t *rx, const size_t rxlen, uint8_
         // Received RWD authentication challenge and response
         case 64: {
             // Store the authentication attempt
-            if (auth_table_len + 8 <= AUTH_TABLE_LENGTH) {
+            if (auth_table != NULL && auth_table_len + 8 <= AUTH_TABLE_LENGTH) {
                 memcpy(auth_table + auth_table_len, rx, 8);
                 auth_table_len += 8;
             }
@@ -283,20 +258,20 @@ static uint32_t hitag2_reader_send_bit(int bit) {
     lf_modulation(true);
 
     // Wait for 4-10 times the carrier period
-    lf_wait_periods(HITAG_T_LOW); // wait for 4-10 times the carrier period
-    uint32_t wait = HITAG_T_LOW;
+    lf_wait_periods(HT2_T_LOW); // wait for 4-10 times the carrier period
+    uint32_t wait = HT2_T_LOW;
 
     // Disable modulation, just activates the field again
     lf_modulation(false);
 
     if (bit == 0) {
         // Zero bit: |_-|
-        lf_wait_periods(HITAG_T_0 - HITAG_T_LOW); // wait for 18-22 times the carrier period
-        wait += HITAG_T_0 - HITAG_T_LOW;
+        lf_wait_periods(HITAG_T_0 - HT2_T_LOW); // wait for 18-22 times the carrier period
+        wait += HITAG_T_0 - HT2_T_LOW;
     } else {
         // One bit: |_--|
-        lf_wait_periods(HITAG_T_1 - HITAG_T_LOW); // wait for 26-32 times the carrier period
-        wait += HITAG_T_1 - HITAG_T_LOW;
+        lf_wait_periods(HT2_T_1 - HT2_T_LOW); // wait for 26-32 times the carrier period
+        wait += HT2_T_1 - HT2_T_LOW;
     }
 
     return wait;
@@ -318,8 +293,8 @@ static uint32_t hitag2_reader_send_frame(const uint8_t *frame, size_t frame_len)
     lf_modulation(true);
 
     // Wait for 4-10 times the carrier period
-    lf_wait_periods(HITAG_T_LOW);
-    wait += HITAG_T_LOW;
+    lf_wait_periods(HT2_T_LOW);
+    wait += HT2_T_LOW;
 
     // Disable modulation, just activates the field again
     lf_modulation(false);
@@ -349,8 +324,8 @@ static uint32_t hitag2_reader_send_framebits(const uint8_t *frame, size_t frame_
     lf_modulation(true);
 
     // Wait for 4-10 times the carrier period
-    lf_wait_periods(HITAG_T_LOW);
-    wait += HITAG_T_LOW;
+    lf_wait_periods(HT2_T_LOW);
+    wait += HT2_T_LOW;
 
     // Disable modulation, just activates the field again
     // set GPIO_SSC_DOUT to LOW
@@ -1202,15 +1177,15 @@ void SniffHitag2(bool ledcontrol) {
 
         WDT_HIT();
 
-        // Receive frame, watch for at most HITAG_T0 * HITAG_T_EOF periods since the last edge
-        while (GetLoEdgeCaptureCount() < (HITAG_T0 * HITAG_T_EOF)) {
+        // Receive frame, watch for at most T0 * HITAG_T_EOF periods since the last edge
+        while (GetLoEdgeCaptureCount() < (T0 * HITAG_T_EOF)) {
 
             // Read (and clear) the input-capture edge-event flags.
             lo_edge_t lo_edge = GetLoEdgeCaptureStatus();
 
             // Rising edge: RA holds the falling->rising sub-period (the reader's tlow).
             if (lo_edge == LO_EDGE_RISING) {
-                int ra = GetLoEdgeCaptureRising() / HITAG_T0;
+                int ra = GetLoEdgeCaptureRising() / T0;
 
                 // Shorter periods only happen with reader frames (reader tlow is 4..10 T0,
                 // while the shortest tag Manchester half-period is 16 T0).
@@ -1224,7 +1199,7 @@ void SniffHitag2(bool ledcontrol) {
 
             // Falling edge: RB holds the falling->falling full period (the bit timing).
             if (lo_edge == LO_EDGE_FALLING) {
-                int rb = GetLoEdgeCaptureFalling() / HITAG_T0;
+                int rb = GetLoEdgeCaptureFalling() / T0;
 
                 if (reader_frame) {
 
@@ -1232,8 +1207,8 @@ void SniffHitag2(bool ledcontrol) {
                     // Capture reader frame
                     if (rb >= HITAG_T_STOP) {
                         // Capture the T0 periods that have passed since last communication or field drop (reset)
-                        response = (rb - HITAG_T_LOW);
-                        if (rxlen != 0) { Dbprintf("rb - HITAG_T_LOW... %i", response); }
+                        response = (rb - HT2_T_LOW);
+                        if (rxlen != 0) { Dbprintf("rb - HT2_T_LOW... %i", response); }
 
                     } else if (rb >= HITAG_T_1_MIN) {
                         // '1' bit
@@ -1343,20 +1318,22 @@ void SniffHitag2(bool ledcontrol) {
 // Hitag 2 simulation
 void SimulateHitag2(bool ledcontrol) {
 
-    BigBuf_free();
-    BigBuf_Clear_ext(false);
-    set_tracing(true);
-
-    // empties bigbuff etc
-    lf_init(LF_ADC_TAG_SIM, LF_ADC_WAV_REVERSED, ledcontrol);
-
-    int response = 0;
+    // Keep the dump uploaded by `lf hitag eload` and use it as the simulated
+    // transponder memory.  BigBuf_free()/BigBuf_Clear_ext() would discard the
+    // emulator allocation and erase its contents before simulation starts.
+    uint8_t *emulator = BigBuf_get_EM_addr();
+    memcpy(tag.sectors, emulator, HITAG2_MAX_BYTE_SIZE);
+    BigBuf_free_keep_EM();
+    BigBuf_Clear_keep_EM();
     uint8_t rx[HITAG_FRAME_LEN] = {0};
     uint8_t tx[HITAG_FRAME_LEN] = {0};
+    size_t rxlen = 0;
+    size_t txlen = 0;
+    int overflow = 0;
 
     auth_table_len = 0;
     auth_table_pos = 0;
-//    auth_table = BigBuf_calloc(AUTH_TABLE_LENGTH);
+    auth_table = BigBuf_calloc(AUTH_TABLE_LENGTH);
 
     DbpString("Starting Hitag 2 simulation");
 
@@ -1365,7 +1342,7 @@ void SimulateHitag2(bool ledcontrol) {
 
     // printing
     uint32_t block = 0;
-    for (size_t i = 0; i < 12; i++) {
+    for (size_t i = 0; i < HITAG2_MAX_BLOCKS; i++) {
 
         // num2bytes?
         for (size_t j = 0; j < 4; j++) {
@@ -1375,186 +1352,46 @@ void SimulateHitag2(bool ledcontrol) {
         Dbprintf("| %d | %08x |", i, block);
     }
 
-    size_t max_nrzs = 8 * HITAG_FRAME_LEN + 5;
-    uint8_t nrz_samples[max_nrzs];
+    hitag_setup_fpga(0, 127, ledcontrol);
 
-//    uint32_t command_start = 0, command_duration = 0;
-    //  int16_t checked = 0;
-
-// SIMULATE
-    uint32_t signal_size = 10000;
-    while (BUTTON_PRESS() == false) {
-
-        // use malloc
-        initSampleBufferEx(&signal_size, true);
-
-        if (ledcontrol) {
-            LED_D_ON();
-            LED_A_OFF();
-        }
-
-//        lf_reset_counter();
+    while ((BUTTON_PRESS() == false) && (data_available() == false)) {
+        uint32_t start_time = 0;
         WDT_HIT();
 
-        /*
-                // only every 1000th times, in order to save time when collecting samples.
-                if (checked == 100) {
-                    if (data_available()) {
-                        checked = -1;
-                        break;
-                    } else {
-                        checked = 0;
-                    }
-                }
-                ++checked;
-        */
-        size_t rxlen = 0, txlen = 0;
+        // Reader-to-tag traffic uses binary pulse length modulation.  The old
+        // ADC/Manchester path decoded field noise as two- or four-bit frames
+        // and never reconstructed the five-bit START_AUTH command.
+        hitag_tag_receive_frame(rx, sizeof(rx), &rxlen, &start_time, ledcontrol, &overflow);
 
-        // Keep administration of the first edge detection
-        bool waiting_for_first_edge = true;
+        if (rxlen > 0) {
+            LogTraceBits(rx, rxlen, start_time, TIMESTAMP, true);
+            StopLoEdgeCapture();
 
-        // Did we detected any modulaiton at all
-        bool detected_modulation = false;
-
-        // Use the current modulation state as starting point
-        uint8_t reader_modulation = lf_get_reader_modulation();
-
-        // Receive frame, watch for at most max_nrzs periods
-        // Reset the number of NRZ samples and use edge detection to detect them
-        size_t nrzs = 0;
-        while (nrzs < max_nrzs) {
-            // Get the timing of the next edge in number of wave periods
-            size_t periods = lf_count_edge_periods(128);
-
-            // Just break out of loop after an initial time-out (tag is probably not available)
-            // The function lf_count_edge_periods() returns 0 when a time-out occurs
-            if (periods == 0) {
-                break;
-            }
-
-            if (ledcontrol) LED_A_ON();
-
-            // Are we dealing with the first incoming edge
-            if (waiting_for_first_edge) {
-
-                // Register the number of periods that have passed
-                response = periods;
-
-                // Indicate that we have dealt with the first edge
-                waiting_for_first_edge = false;
-
-                // The first edge is always a single NRZ bit, force periods on 16
-                periods = 16;
-
-                // We have received more than 0 periods, so we have detected a tag response
-                detected_modulation = true;
-            }
-
-            // Evaluate the number of periods before the next edge
-            if (periods > 24 && periods <= 64) {
-                // Detected two sequential equal bits and a modulation switch
-                // NRZ modulation: (11 => --|) or (11 __|)
-                nrz_samples[nrzs++] = reader_modulation;
-                if (nrzs < max_nrzs) {
-                    nrz_samples[nrzs++] = reader_modulation;
-                }
-                // Invert tag modulation state
-                reader_modulation ^= 1;
-            } else if (periods > 0 && periods <= 24) {
-                // Detected one bit and a modulation switch
-                // NRZ modulation: (1 => -|) or (0 _|)
-                nrz_samples[nrzs++] = reader_modulation;
-                reader_modulation ^= 1;
-            } else {
-                reader_modulation ^= 1;
-                // The function lf_count_edge_periods() returns > 64 periods, this is not a valid number periods
-                Dbprintf("Detected unexpected period count: %zu", periods);
-                break;
-            }
-        }
-
-        if (ledcontrol) LED_D_OFF();
-
-        // If there is no response, just repeat the loop
-        if (!detected_modulation) continue;
-
-        if (ledcontrol) LED_A_OFF();
-
-        // Make sure we always have an even number of samples. This fixes the problem
-        // of ending the manchester decoding with a zero. See the example below where
-        // the '|' character is end of modulation
-        //  One at the end: ..._-|_____...
-        // Zero at the end: ...-_|_____...
-        // The last modulation change of a zero is not detected, but we should take
-        // the half period in account, otherwise the demodulator will fail.
-        if ((nrzs % 2) != 0) {
-            if (nrzs >= max_nrzs) {
-                Dbprintf("max_nrzs (%d) is odd?  Must be even!", max_nrzs); // should be a static assert above
-                continue;
-            }
-            nrz_samples[nrzs++] = reader_modulation;
-        }
-
-        if (ledcontrol) LED_B_ON();
-
-        // decode bitstream
-        manrawdecode((uint8_t *)nrz_samples, &nrzs, true, 0);
-
-        // Verify if the header consists of five consecutive ones
-        if (nrzs < 5) {
-            Dbprintf("Detected unexpected number of manchester decoded samples [%d]", nrzs);
-            continue;
-        } else {
-            for (size_t i = 0; i < 5; i++) {
-                if (nrz_samples[i] != 1) {
-                    Dbprintf("Detected incorrect header, the bit [%d] is zero instead of one", i);
-                }
-            }
-        }
-
-        // Pack the response into a byte array
-        for (size_t i = 5; i < 37; i++) {
-            uint8_t bit = nrz_samples[i];
-            rx[rxlen / 8] |= bit << (7 - (rxlen % 8));
-            rxlen++;
-        }
-
-        // Check if frame was captured
-        if (rxlen > 4) {
-
-            LogTraceBits(rx, rxlen, response, response, true);
-
-            // Process the incoming frame (rx) and prepare the outgoing frame (tx)
             hitag2_handle_reader_command(rx, rxlen, tx, &txlen);
 
-            // Wait for HITAG_T_WAIT_1 carrier periods after the last reader bit,
-            // not that since the clock counts since the rising edge, but T_Wait1 is
-            // with respect to the falling edge, we need to wait actually (T_Wait1 - T_Low)
-            // periods. The gap time T_Low varies (4..10). All timer values are in
-            // terms of T0 units (HITAG_T_WAIT_1_MIN - HITAG_T_LOW )
-            lf_wait_periods(HITAG_T_WAIT_1_MIN);
+            while (GetPrecisionCounter() < T0 * (HITAG_T_WAIT_RESP - HITAG_T_LOW)) {};
 
-            // Send and store the tag answer (if there is any)
-            if (txlen) {
-                // Transmit the tag frame
-                lf_manchester_send_bytes(tx, txlen, ledcontrol);
-
-                // Store the frame in the trace
-                LogTraceBits(tx, txlen, 0, 0, false);
+            if (txlen > 0) {
+                start_time = TIMESTAMP;
+                hitag_tag_send_frame(tx, txlen, 5, MC4K, ledcontrol);
+                LogTraceBits(tx, txlen, start_time, TIMESTAMP, false);
             }
 
-            // Reset the received frame and response timing info
+            EnableLoEdgeCapture();
             memset(rx, 0x00, sizeof(rx));
-            response = 0;
-
-            if (ledcontrol) LED_B_OFF();
         }
+
+        rxlen = 0;
+        txlen = 0;
+        overflow += GetLoEdgeCaptureCount() / T0;
+        ResetLoEdgeCapture();
     }
 
-    lf_finalize(ledcontrol);
+    hitag_cleanup(ledcontrol);
 
-    // release allocated memory from BigBuff.
-    BigBuf_free();
+    // Preserve writes made while simulating for `lf hitag eview`.
+    memcpy(emulator, tag.sectors, HITAG2_MAX_BYTE_SIZE);
+    BigBuf_free_keep_EM();
 
     DbpString("Sim stopped");
 
